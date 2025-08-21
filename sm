@@ -1,0 +1,475 @@
+#!/usr/bin/env bash
+
+# Service Manager (sm) - A lightweight wrapper around systemctl and journalctl
+# Usage: sm <command> [args]
+
+set -e
+
+# Configuration
+SM_DIR="$HOME/.sm"
+SM_PROJECTS_FILE="$SM_DIR/projects.txt"
+SERVICE_TEMPLATE="$SM_DIR/service.template"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Initialize sm directory and files
+init_sm() {
+    if [[ ! -d "$SM_DIR" ]]; then
+        mkdir -p "$SM_DIR"
+    fi
+    
+    if [[ ! -f "$SM_PROJECTS_FILE" ]]; then
+        touch "$SM_PROJECTS_FILE"
+    fi
+    
+    if [[ ! -f "$SERVICE_TEMPLATE" ]]; then
+        cat > "$SERVICE_TEMPLATE" << 'EOF'
+[Unit]
+Description={{DESCRIPTION}}
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+User={{USER}}
+WorkingDirectory={{WORKING_DIR}}
+ExecStart={{EXEC_START}}
+MemoryMax=1G
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+}
+
+# Helper functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if project exists in our registry
+project_exists() {
+    local name="$1"
+    grep -q "^$name:" "$SM_PROJECTS_FILE" 2>/dev/null
+}
+
+# Add project to registry
+add_to_registry() {
+    local name="$1"
+    local service_file="$2"
+    local working_dir="$3"
+    echo "$name:$service_file:$working_dir" >> "$SM_PROJECTS_FILE"
+}
+
+# Get service file path for project
+get_service_file() {
+    local name="$1"
+    grep "^$name:" "$SM_PROJECTS_FILE" 2>/dev/null | cut -d: -f2
+}
+
+# Remove project from registry
+remove_from_registry() {
+    local name="$1"
+    if [[ -f "$SM_PROJECTS_FILE" ]]; then
+        sed -i "/^$name:/d" "$SM_PROJECTS_FILE"
+    fi
+}
+
+# Infer project name from .service file in current directory
+infer_project_name() {
+    local current_dir=$(pwd)
+    local service_files=(*.service)
+    
+    # Check if any .service files exist
+    if [[ ${#service_files[@]} -eq 1 && "${service_files[0]}" == "*.service" ]]; then
+        return 1  # No service files found
+    fi
+    
+    if [[ ${#service_files[@]} -eq 1 ]]; then
+        # Single service file found
+        local service_file="${service_files[0]}"
+        local name=$(basename "$service_file" .service)
+        echo "$name"
+        return 0
+    else
+        # Multiple service files found
+        log_warning "Multiple .service files found in current directory:"
+        for i in "${!service_files[@]}"; do
+            echo "  $((i+1))) ${service_files[$i]}"
+        done
+        read -p "Select service file (1-${#service_files[@]}): " choice
+        
+        if [[ "$choice" -ge 1 && "$choice" -le ${#service_files[@]} ]]; then
+            local service_file="${service_files[$((choice-1))]}"
+            local name=$(basename "$service_file" .service)
+            echo "$name"
+            return 0
+        else
+            log_error "Invalid selection"
+            return 1
+        fi
+    fi
+}
+
+# Generate service file from template
+generate_service() {
+    local name="$1"
+    local description="$2"
+    local exec_start="$3"
+    local working_dir="$4"
+    local user="$5"
+    local service_file="$working_dir/$name.service"
+    
+    sed -e "s|{{DESCRIPTION}}|$description|g" \
+        -e "s|{{USER}}|$user|g" \
+        -e "s|{{WORKING_DIR}}|$working_dir|g" \
+        -e "s|{{EXEC_START}}|$exec_start|g" \
+        "$SERVICE_TEMPLATE" > "$service_file"
+    
+    echo "$service_file"
+}
+
+# Command implementations
+cmd_add() {
+    local current_dir=$(pwd)
+    local service_files=(*.service)
+    
+    # Check if any .service files exist
+    if [[ ${#service_files[@]} -eq 1 && "${service_files[0]}" == "*.service" ]]; then
+        log_info "No .service file found in current directory."
+        echo
+        read -p "Generate a new service file? (y/N): " generate
+        
+        if [[ "$generate" =~ ^[Yy]$ ]]; then
+            echo
+            read -p "Project name: " name
+            [[ -z "$name" ]] && { log_error "Project name is required"; exit 1; }
+            
+            read -p "Description: " description
+            [[ -z "$description" ]] && description="$name service"
+            
+            read -p "Executable path (relative to current dir): " exec_path
+            [[ -z "$exec_path" ]] && { log_error "Executable path is required"; exit 1; }
+            
+            # Make exec_path absolute
+            if [[ ! "$exec_path" =~ ^/ ]]; then
+                exec_path="$current_dir/$exec_path"
+            fi
+            
+            # Check if executable exists
+            if [[ ! -f "$exec_path" ]] && [[ ! -x "$exec_path" ]]; then
+                log_warning "Executable '$exec_path' not found or not executable"
+            fi
+            
+            local user=$(whoami)
+            local service_file=$(generate_service "$name" "$description" "$exec_path" "$current_dir" "$user")
+            
+            log_success "Generated service file: $service_file"
+            
+            # Install the service
+            sudo cp "$service_file" "/etc/systemd/system/"
+            sudo systemctl daemon-reload
+            
+            add_to_registry "$name" "$service_file" "$current_dir"
+            log_success "Project '$name' added successfully"
+        fi
+    else
+        # Use existing service file
+        if [[ ${#service_files[@]} -eq 1 ]]; then
+            local service_file="${service_files[0]}"
+        else
+            echo "Multiple .service files found:"
+            for i in "${!service_files[@]}"; do
+                echo "  $((i+1))) ${service_files[$i]}"
+            done
+            read -p "Select service file (1-${#service_files[@]}): " choice
+            service_file="${service_files[$((choice-1))]}"
+        fi
+        
+        local name=$(basename "$service_file" .service)
+        
+        if project_exists "$name"; then
+            log_error "Project '$name' already exists"
+            exit 1
+        fi
+        
+        # Install the service
+        sudo cp "$service_file" "/etc/systemd/system/"
+        sudo systemctl daemon-reload
+        
+        add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+        log_success "Project '$name' added successfully"
+    fi
+}
+
+cmd_start() {
+    local name="$1"
+    
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm start <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+    
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found. Use 'sm ls' to see available projects or 'sm add' to add it."
+        exit 1
+    fi
+    
+    log_info "Starting service '$name'..."
+    sudo systemctl enable "$name.service"
+    sudo systemctl restart "$name.service"
+    
+    # Check if service started successfully
+    if systemctl is-active --quiet "$name.service"; then
+        log_success "Service '$name' started successfully"
+    else
+        log_error "Failed to start service '$name'"
+        echo "Use 'sm logs $name' to see error details"
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    local name="$1"
+    
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm stop <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+    
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found. Use 'sm ls' to see available projects."
+        exit 1
+    fi
+    
+    log_info "Stopping service '$name'..."
+    sudo systemctl stop "$name.service"
+    log_success "Service '$name' stopped"
+}
+
+cmd_logs() {
+    local name="$1"
+    local name="$1"
+    
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm start <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found. Use 'sm ls' to see available projects."
+        exit 1
+    fi
+    
+    log_info "Showing logs for '$name' (press Ctrl+C to exit)..."
+    echo
+    
+    # Set up signal handling to exit cleanly
+    trap 'echo; log_info "Stopped watching logs"; exit 0' INT TERM
+    
+    # Execute journalctl in a way that handles interruption better
+    exec journalctl -u "$name.service" -f --no-pager
+}
+
+cmd_ls() {
+    if [[ ! -s "$SM_PROJECTS_FILE" ]]; then
+        log_info "No projects found. Use 'sm add' to add a project."
+        return
+    fi
+    
+    echo
+    printf "%-20s %-10s %-8s %-10s %-12s %-30s\n" "NAME" "STATUS" "PID" "MEMORY" "UPTIME" "WORKING DIRECTORY"
+    printf "%-20s %-10s %-8s %-10s %-12s %-30s\n" "----" "------" "---" "------" "------" "-----------------"
+    
+    while IFS=':' read -r name service_file working_dir; do
+        local status pid memory uptime
+        
+        if systemctl is-active --quiet "$name.service" 2>/dev/null; then
+            status="running"
+            
+            # Get PID
+            pid=$(systemctl show -p MainPID "$name.service" --value 2>/dev/null || echo "-")
+            [[ "$pid" == "0" ]] && pid="-"
+            
+            # Get memory usage (in MB)
+            if [[ "$pid" != "-" ]]; then
+                memory=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.1fM", $1/1024}' || echo "-")
+            else
+                memory="-"
+            fi
+            
+            # Get uptime
+            uptime=$(systemctl show -p ActiveEnterTimestamp "$name.service" --value 2>/dev/null)
+            if [[ -n "$uptime" && "$uptime" != "n/a" ]]; then
+                local start_epoch=$(date -d "$uptime" +%s 2>/dev/null)
+                local current_epoch=$(date +%s)
+                local diff=$((current_epoch - start_epoch))
+                
+                if [[ $diff -lt 60 ]]; then
+                    uptime="${diff}s"
+                elif [[ $diff -lt 3600 ]]; then
+                    uptime="$((diff/60))m"
+                elif [[ $diff -lt 86400 ]]; then
+                    uptime="$((diff/3600))h$((diff%3600/60))m"
+                else
+                    uptime="$((diff/86400))d$((diff%86400/3600))h"
+                fi
+            else
+                uptime="-"
+            fi
+        else
+            status="stopped"
+            pid="-"
+            memory="-"
+            uptime="-"
+        fi
+        
+        # Use echo -e instead of printf for color support
+        if [[ "$status" == "running" ]]; then
+            echo -e "$(printf "%-20s " "$name")${GREEN}$(printf "%-10s" "$status")${NC}$(printf " %-8s %-10s %-12s %-30s" "$pid" "$memory" "$uptime" "$working_dir")"
+        else
+            echo -e "$(printf "%-20s " "$name")${RED}$(printf "%-10s" "$status")${NC}$(printf " %-8s %-10s %-12s %-30s" "$pid" "$memory" "$uptime" "$working_dir")"
+        fi
+        
+    done < "$SM_PROJECTS_FILE"
+    echo
+}
+
+cmd_remove() {
+    local name="$1"
+    
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm remove <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+    
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found"
+        exit 1
+    fi
+    
+    read -p "Confirm to remove the project? (y/N): " confirm
+    
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+
+        log_info "Removing project '$name'..."
+
+        # Stop and disable service
+        sudo systemctl stop "$name.service" 2>/dev/null || true
+        sudo systemctl disable "$name.service" 2>/dev/null || true
+
+        # Remove service file
+        sudo rm -f "/etc/systemd/system/$name.service"
+        sudo systemctl daemon-reload
+
+        # Remove from registry
+        remove_from_registry "$name"
+
+        log_success "Project '$name' removed successfully"
+    fi
+}
+
+cmd_help() {
+    echo "Service Manager (sm) - A lightweight wrapper around systemctl"
+    echo
+    echo "Usage:"
+    echo "  sm add                        - Add project from current directory"
+    echo "  sm start [project_name]       - Start a project (infers name from .service file if not provided)"
+    echo "  sm stop [project_name]        - Stop a project (infers name from .service file if not provided)"
+    echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
+    echo "  sm ls                         - List all projects"
+    echo "  sm remove [project_name]      - Remove a project (infers name from .service file if not provided)"
+    echo "  sm help                       - Show this help message"
+    echo
+    echo "Note: Commands that accept [project_name] will automatically infer the project name"
+    echo "      from .service files in the current directory if no name is provided."
+    echo
+}
+
+# Main command dispatcher
+main() {
+    init_sm
+    
+    local command="$1"
+    shift || true
+    
+    case "$command" in
+        add)
+            cmd_add "$@"
+            ;;
+        start)
+            cmd_start "$@"
+            ;;
+        stop)
+            cmd_stop "$@"
+            ;;
+        logs)
+            cmd_logs "$@"
+            ;;
+        ls|list)
+            cmd_ls "$@"
+            ;;
+        remove|rm)
+            cmd_remove "$@"
+            ;;
+        help|--help|-h)
+            cmd_help
+            ;;
+        "")
+            log_error "No command specified. Use 'sm help' for usage information."
+            exit 1
+            ;;
+        *)
+            log_error "Unknown command: $command"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function with all arguments
+main "$@"
