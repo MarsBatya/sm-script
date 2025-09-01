@@ -149,6 +149,34 @@ generate_service() {
     echo "$service_file"
 }
 
+# Find the directory containing the sm script
+find_sm_repo() {
+    local installed_sm="/usr/local/bin/sm"
+    
+    if [[ ! -f "$installed_sm" ]]; then
+        return 1
+    fi
+    
+    # Get the inode of the installed sm script
+    local inode
+    inode=$(stat -c %i "$installed_sm" 2>/dev/null)
+    
+    if [[ -z "$inode" ]]; then
+        return 1
+    fi
+    
+    # Find the original file with the same inode (hard link)
+    local original_path
+    original_path=$(find /home -inum "$inode" -type f 2>/dev/null | grep -v "/usr/local/bin/sm" | head -1)
+    
+    if [[ -z "$original_path" ]]; then
+        return 1
+    fi
+    
+    # Get the directory containing the original script
+    dirname "$original_path"
+}
+
 # Command implementations
 cmd_add() {
     local current_dir=$(pwd)
@@ -413,6 +441,37 @@ cmd_remove() {
     fi
 }
 
+cmd_update() {
+    local repo_dir
+    repo_dir=$(find_sm_repo)
+    
+    if [[ ! -d "$repo_dir" ]]; then
+        log_error "Could not find sm repository directory"
+        exit 1
+    fi
+    
+    if [[ ! -d "$repo_dir/.git" ]]; then
+        log_error "sm repository directory is not a git repository: $repo_dir"
+        log_info "The sm script should be in a git repository to use the update command"
+        exit 1
+    fi
+    
+    log_info "Updating sm from repository in: $repo_dir"
+    
+    # Change to repo directory and pull updates
+    if cd "$repo_dir" && git pull origin master; then
+        log_success "sm updated successfully"
+        
+        # Make sure the script is executable
+        chmod +x "$repo_dir/sm"
+        
+        log_info "Restart your terminal or run 'hash -r' to refresh the command cache"
+    else
+        log_error "Failed to update sm repository"
+        exit 1
+    fi
+}
+
 cmd_help() {
     echo "Service Manager (sm) - A lightweight wrapper around systemctl"
     echo
@@ -423,6 +482,7 @@ cmd_help() {
     echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
     echo "  sm ls                         - List all projects"
     echo "  sm remove [project_name]      - Remove a project (infers name from .service file if not provided)"
+    echo "  sm update                     - Update sm from git repository"
     echo "  sm help                       - Show this help message"
     echo
     echo "Note: Commands that accept [project_name] will automatically infer the project name"
@@ -455,6 +515,9 @@ main() {
             ;;
         remove|rm)
             cmd_remove "$@"
+            ;;
+        update)
+            cmd_update "$@"
             ;;
         help|--help|-h)
             cmd_help
