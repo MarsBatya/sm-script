@@ -151,30 +151,16 @@ generate_service() {
 
 # Find the directory containing the sm script
 find_sm_repo() {
-    local installed_sm="/usr/local/bin/sm"
+    # Get the actual path of the sm script (resolving symlinks)
+    local sm_script_path
+    sm_script_path=$(readlink -f "$(command -v sm)")
     
-    if [[ ! -f "$installed_sm" ]]; then
+    if [[ -z "$sm_script_path" ]]; then
         return 1
     fi
     
-    # Get the inode of the installed sm script
-    local inode
-    inode=$(stat -c %i "$installed_sm" 2>/dev/null)
-    
-    if [[ -z "$inode" ]]; then
-        return 1
-    fi
-    
-    # Find the original file with the same inode (hard link)
-    local original_path
-    original_path=$(find /home -inum "$inode" -type f 2>/dev/null | grep -v "/usr/local/bin/sm" | head -1)
-    
-    if [[ -z "$original_path" ]]; then
-        return 1
-    fi
-    
-    # Get the directory containing the original script
-    dirname "$original_path"
+    # Get the directory containing the script
+    dirname "$sm_script_path"
 }
 
 # Command implementations
@@ -480,7 +466,7 @@ cmd_update() {
     local repo_dir
     repo_dir=$(find_sm_repo)
     
-    if [[ ! -d "$repo_dir" ]]; then
+    if [[ -z "$repo_dir" ]]; then
         log_error "Could not find sm repository directory"
         exit 1
     fi
@@ -494,13 +480,9 @@ cmd_update() {
     log_info "Updating sm from repository in: $repo_dir"
     
     # Change to repo directory and pull updates
-    if cd "$repo_dir" && git pull origin master; then
+    if (cd "$repo_dir" && git pull origin master); then
         log_success "sm updated successfully"
-        
-        # Make sure the script is executable
-        chmod +x "$repo_dir/sm"
-        
-        log_info "Restart your terminal or run 'hash -r' to refresh the command cache"
+        log_info "Changes are immediately available since sm is symlinked"
     else
         log_error "Failed to update sm repository"
         exit 1
