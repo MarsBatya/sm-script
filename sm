@@ -205,7 +205,7 @@ cmd_add() {
             sudo systemctl daemon-reload
             
             add_to_registry "$name" "$service_file" "$current_dir"
-            log_success "Project '$name' added successfully"
+            log_success "Project '$name' added successfully, to start it, use 'sm start $name'"
         fi
     else
         # Use existing service file
@@ -266,7 +266,7 @@ cmd_add() {
             sudo cp "$service_file" "/etc/systemd/system/"
             sudo systemctl daemon-reload
             add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
-            log_success "Project '$name' added successfully"
+            log_success "Project '$name' added successfully, to start it, use 'sm start $name'"
         fi
     fi
 }
