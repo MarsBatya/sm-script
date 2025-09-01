@@ -5,7 +5,7 @@
 sudo ln sm /usr/local/bin/sm && sudo chmod +x /usr/local/bin/sm
 ```
 
-### verifying:
+### verifying installation:
 ```bash
 sm help
 ```
