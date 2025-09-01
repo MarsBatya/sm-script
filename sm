@@ -241,12 +241,47 @@ cmd_add() {
             exit 1
         fi
         
-        # Install the service
-        sudo cp "$service_file" "/etc/systemd/system/"
-        sudo systemctl daemon-reload
-        
-        add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
-        log_success "Project '$name' added successfully"
+        # Check if service already exists in systemd
+        if [[ -f "/etc/systemd/system/$name.service" ]]; then
+            log_warning "Service '$name.service' already exists in systemd"
+            echo
+            echo "Options:"
+            echo "  1) Add to sm management only (recommended if service is already working)"
+            echo "  2) Overwrite systemd service file and reload"
+            echo "  3) Cancel"
+            echo
+            read -p "Choose option (1-3): " choice
+            
+            case "$choice" in
+                1)
+                    # Just add to registry without touching systemd
+                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+                    log_success "Project '$name' added to sm management"
+                    ;;
+                2)
+                    # Overwrite and reload
+                    log_info "Overwriting existing service file..."
+                    sudo cp "$service_file" "/etc/systemd/system/"
+                    sudo systemctl daemon-reload
+                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+                    log_success "Project '$name' added and service file updated"
+                    ;;
+                3)
+                    log_info "Operation cancelled"
+                    exit 0
+                    ;;
+                *)
+                    log_error "Invalid option"
+                    exit 1
+                    ;;
+            esac
+        else
+            # Service doesn't exist, install normally
+            sudo cp "$service_file" "/etc/systemd/system/"
+            sudo systemctl daemon-reload
+            add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+            log_success "Project '$name' added successfully"
+        fi
     fi
 }
 
