@@ -2,7 +2,7 @@
 
 ### installing:
 ```bash
-sudo ln sm /usr/local/bin/sm && sudo chmod +x /usr/local/bin/sm
+sudo ln -s $PWD/sm /usr/local/bin/sm && sudo chmod +x $PWD/sm
 ```
 
 ### verifying installation:
