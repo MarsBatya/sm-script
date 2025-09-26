@@ -357,6 +357,27 @@ cmd_logs() {
     exec journalctl -u "$name.service" -f --no-pager
 }
 
+cmd_workdir() {
+    local name="$1"
+    
+    if [[ -z "$name" ]]; then
+        exit 1
+    fi
+    
+    if ! project_exists "$name"; then
+        exit 1
+    fi
+    
+    while IFS=':' read -r proj_name service_file working_dir; do
+        if [[ "$proj_name" == "$name" ]]; then
+            echo "$working_dir"
+            exit 0
+        fi
+    done < "$SM_PROJECTS_FILE"
+    
+    exit 1
+}
+
 cmd_ls() {
     if [[ ! -s "$SM_PROJECTS_FILE" ]]; then
         log_info "No projects found. Use 'sm add' to add a project."
@@ -461,6 +482,7 @@ cmd_remove() {
     fi
 }
 
+
 cmd_update() {
     local repo_dir
     repo_dir=$(find_sm_repo)
@@ -488,7 +510,15 @@ cmd_update() {
     fi
 }
 
-cmd_install_completion() {
+cmd_dive_dummy() {
+    log_info "This command is not supposed to be run directly, looks like you haven't run 'sm install-helpers' yet."
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        log_info "To get the working directory, run 'sm workdir $name'"
+    fi
+}
+
+cmd_install_helpers() {
     local repo_dir
     repo_dir=$(find_sm_repo)
     
@@ -506,9 +536,27 @@ cmd_install_completion() {
         log_info "Run 'source ~/.bashrc' to reload if needed"
     else
         echo "" >> "$bashrc"
-        echo "# SM (Service Manager) bash completion" >> "$bashrc"
+        echo "# SM (Service Manager) helpful features" >> "$bashrc"
         echo "$source_line" >> "$bashrc"
         log_success "Completion installed to ~/.bashrc"
+        log_info "Run 'source ~/.bashrc' or restart your terminal to activate"
+    fi
+
+    if [[ ! -f "$repo_dir/sm-wrapper-for-dive.sh" ]]; then
+        log_error "Sm wrapper-for-dive not found at: $repo_dir/sm-wrapper-for-dive.sh"
+        exit 1
+    fi
+
+    local source_line="[[ -f \"$repo_dir/sm-wrapper-for-dive.sh\" ]] && source \"$repo_dir/sm-wrapper-for-dive.sh\""
+
+    # Check if already installed
+    if grep -qF "$repo_dir/sm-wrapper-for-dive.sh" "$bashrc" 2>/dev/null; then
+        log_info "Diving feature already installed in ~/.bashrc"
+        log_info "Run 'source ~/.bashrc' to reload if needed"
+    else
+        echo "" >> "$bashrc"
+        echo "$source_line" >> "$bashrc"
+        log_success "Diving feature installed to ~/.bashrc"
         log_info "Run 'source ~/.bashrc' or restart your terminal to activate"
     fi
 }
@@ -521,10 +569,12 @@ cmd_help() {
     echo "  sm start [project_name]       - Start a project (infers name from .service file if not provided)"
     echo "  sm stop [project_name]        - Stop a project (infers name from .service file if not provided)"
     echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
-    echo "  sm ls                         - List all projects"
     echo "  sm remove [project_name]      - Remove a project (infers name from .service file if not provided)"
+    echo "  sm workdir [project_name]     - Echo the project folder path"
+    echo "  sm dive [project_name]        - Dive into a project folder (make sure to run 'sm install-helpers' first once)"
+    echo "  sm ls                         - List all projects"
     echo "  sm update                     - Update sm from git repository"
-    echo "  sm install-completion         - Install bash completion"
+    echo "  sm install-helpers            - Install tab completion and 'sm dive' working properly into your ~/.bashrc"
     echo "  sm help                       - Show this help message"
     echo
     echo "Note: Commands that accept [project_name] will automatically infer the project name"
@@ -561,8 +611,14 @@ main() {
         update)
             cmd_update "$@"
             ;;
-        install-completion)
-            cmd_install_completion "$@"
+        workdir)
+            cmd_workdir "$@"
+            ;;
+        install-helpers)
+            cmd_install_helpers "$@"
+            ;;
+        dive)
+            cmd_dive_dummy "$@"
             ;;
         help|--help|-h)
             cmd_help

@@ -11,7 +11,7 @@ _sm_completion() {
     cword=$COMP_CWORD
 
     # Commands available in sm
-    local commands="add start stop logs ls list remove rm update help"
+    local commands="add start stop logs ls list remove rm workdir dive update install-helpers help"
     
     # Get project names from the registry file
     local sm_dir="$HOME/.sm"
@@ -31,7 +31,7 @@ _sm_completion() {
     # Second argument - complete based on command
     if [[ $cword -eq 2 ]]; then
         case "$prev" in
-            start|stop|logs|remove|rm)
+            start|stop|logs|remove|rm|workdir|dive)
                 # Complete with project names
                 COMPREPLY=( $(compgen -W "$projects" -- "$cur") )
                 return 0
