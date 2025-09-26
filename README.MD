@@ -27,4 +27,6 @@ Usage:
 
   `sm help`                       - Show this help message
 
+  `sm install-completion`         - Install tab completion for "sm"
+
 Note: Commands that accept [project_name] will automatically infer the project name from .service files in the current directory if no name is provided.

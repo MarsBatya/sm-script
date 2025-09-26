@@ -488,6 +488,31 @@ cmd_update() {
     fi
 }
 
+cmd_install_completion() {
+    local repo_dir
+    repo_dir=$(find_sm_repo)
+    
+    if [[ ! -f "$repo_dir/sm-completion.sh" ]]; then
+        log_error "Completion script not found at: $repo_dir/sm-completion.sh"
+        exit 1
+    fi
+    
+    local bashrc="$HOME/.bashrc"
+    local source_line="[[ -f \"$repo_dir/sm-completion.sh\" ]] && source \"$repo_dir/sm-completion.sh\""
+    
+    # Check if already installed
+    if grep -qF "$repo_dir/sm-completion.sh" "$bashrc" 2>/dev/null; then
+        log_info "Completion already installed in ~/.bashrc"
+        log_info "Run 'source ~/.bashrc' to reload if needed"
+    else
+        echo "" >> "$bashrc"
+        echo "# SM (Service Manager) bash completion" >> "$bashrc"
+        echo "$source_line" >> "$bashrc"
+        log_success "Completion installed to ~/.bashrc"
+        log_info "Run 'source ~/.bashrc' or restart your terminal to activate"
+    fi
+}
+
 cmd_help() {
     echo "Service Manager (sm) - A lightweight wrapper around systemctl"
     echo
@@ -499,6 +524,7 @@ cmd_help() {
     echo "  sm ls                         - List all projects"
     echo "  sm remove [project_name]      - Remove a project (infers name from .service file if not provided)"
     echo "  sm update                     - Update sm from git repository"
+    echo "  sm install-completion         - Install bash completion"
     echo "  sm help                       - Show this help message"
     echo
     echo "Note: Commands that accept [project_name] will automatically infer the project name"
@@ -534,6 +560,9 @@ main() {
             ;;
         update)
             cmd_update "$@"
+            ;;
+        install-completion)
+            cmd_install_completion "$@"
             ;;
         help|--help|-h)
             cmd_help
