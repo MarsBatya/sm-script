@@ -330,7 +330,6 @@ cmd_stop() {
 
 cmd_logs() {
     local name="$1"
-    local name="$1"
     
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
