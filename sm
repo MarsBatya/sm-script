@@ -182,21 +182,55 @@ cmd_add() {
             read -p "Description: " description
             [[ -z "$description" ]] && description="$name service"
             
-            read -p "Executable path (relative to current dir): " exec_path
-            [[ -z "$exec_path" ]] && { log_error "Executable path is required"; exit 1; }
-            
-            # Make exec_path absolute
-            if [[ ! "$exec_path" =~ ^/ ]]; then
-                exec_path="$current_dir/$exec_path"
+            read -p "Command to start the service (e.g., 'path/to/python main.py', './myapp', etc.): " exec_command
+            [[ -z "$exec_command" ]] && { log_error "Start command is required"; exit 1; }
+
+            # Parse the command to extract the executable and arguments
+            read -a cmd_array <<< "$exec_command"
+            executable="${cmd_array[0]}"
+            args="${cmd_array[@]:1}"
+
+            # Handle different types of executables
+            if [[ "$executable" =~ ^/ ]]; then
+                # Already absolute path
+                abs_executable="$executable"
+            elif command -v "$executable" >/dev/null 2>&1; then
+                # It's a system command (like python, node, java, etc.)
+                abs_executable="$(command -v "$executable")"
+                log_info "Using system executable: $abs_executable"
+            else
+                # Relative path - make it absolute
+                abs_executable="$current_dir/$executable"
             fi
-            
-            # Check if executable exists
-            if [[ ! -f "$exec_path" ]] && [[ ! -x "$exec_path" ]]; then
-                log_warning "Executable '$exec_path' not found or not executable"
+
+            # Validate the executable
+            if command -v "$executable" >/dev/null 2>&1; then
+                # System command exists
+                log_info "System command '$executable' found"
+            elif [[ -f "$abs_executable" && -x "$abs_executable" ]]; then
+                # Local executable exists and is executable
+                log_info "Local executable '$abs_executable' found"
+            elif [[ -f "$abs_executable" ]]; then
+                # File exists but not executable
+                log_warning "File '$abs_executable' exists but is not executable. You may need to run: chmod +x '$abs_executable'"
+            else
+                # File doesn't exist
+                log_warning "Executable '$executable' not found in PATH or at '$abs_executable'"
             fi
-            
+
+            # For relative paths in the final command, we might want to use absolute paths
+            if [[ "$executable" =~ ^/ ]] || command -v "$executable" >/dev/null 2>&1; then
+                # Use the command as-is (absolute path or system command)
+                final_exec_start="$exec_command"
+            else
+                # Convert relative executable to absolute path
+                final_exec_start="$abs_executable $args"
+            fi
+
+            log_info "ExecStart will be set to: $final_exec_start"
+
             local user=$(whoami)
-            local service_file=$(generate_service "$name" "$description" "$exec_path" "$current_dir" "$user")
+            local service_file=$(generate_service "$name" "$description" "$final_exec_start" "$current_dir" "$user")
             
             log_success "Generated service file: $service_file"
             
