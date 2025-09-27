@@ -412,6 +412,35 @@ cmd_workdir() {
     exit 1
 }
 
+
+# Helper function to format uptime
+format_uptime() {
+    local uptime_str="$1"
+    if [[ -z "$uptime_str" || "$uptime_str" == "n/a" ]]; then
+        echo "-"
+        return
+    fi
+    
+    local start_epoch=$(date -d "$uptime_str" +%s 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        echo "-"
+        return
+    fi
+    
+    local current_epoch=$(date +%s)
+    local diff=$((current_epoch - start_epoch))
+    
+    if [[ $diff -lt 60 ]]; then
+        echo "${diff}s"
+    elif [[ $diff -lt 3600 ]]; then
+        echo "$((diff/60))m"
+    elif [[ $diff -lt 86400 ]]; then
+        echo "$((diff/3600))h$((diff%3600/60))m"
+    else
+        echo "$((diff/86400))d$((diff%86400/3600))h"
+    fi
+}
+
 cmd_ls() {
     if [[ ! -s "$SM_PROJECTS_FILE" ]]; then
         log_info "No projects found. Use 'sm add' to add a project."
@@ -422,57 +451,111 @@ cmd_ls() {
     printf "%-20s %-10s %-8s %-10s %-12s %-30s\n" "NAME" "STATUS" "PID" "MEMORY" "UPTIME" "WORKING DIRECTORY"
     printf "%-20s %-10s %-8s %-10s %-12s %-30s\n" "----" "------" "---" "------" "------" "-----------------"
     
+    # Read all project names first
+    local -a project_names=()
+    local -A project_data=()
+    
     while IFS=':' read -r name service_file working_dir; do
-        local status pid memory uptime
+        project_names+=("$name")
+        project_data["$name"]="$service_file:$working_dir"
+    done < "$SM_PROJECTS_FILE"
+    
+    # Batch systemctl calls for better performance
+    local -A service_status=()
+    local -A service_pids=()
+    local -A service_uptimes=()
+    
+    # Get all statuses in one call
+    if [[ ${#project_names[@]} -gt 0 ]]; then
+        local services=()
+        for name in "${project_names[@]}"; do
+            services+=("$name.service")
+        done
         
-        if systemctl is-active --quiet "$name.service" 2>/dev/null; then
+        # Batch status check
+        while read -r service status; do
+            local name="${service%.service}"
+            service_status["$name"]="$status"
+        done < <(systemctl is-active "${services[@]}" 2>/dev/null | nl -nln -w1 -s' ' | while read -r i status; do
+            echo "${services[$((i-1))]} $status"
+        done)
+        
+        # Get running services for PID and uptime batch queries
+        local -a running_services=()
+        for name in "${project_names[@]}"; do
+            if [[ "${service_status[$name]}" == "active" ]]; then
+                running_services+=("$name.service")
+            fi
+        done
+        
+        # Batch PID retrieval for running services
+        if [[ ${#running_services[@]} -gt 0 ]]; then
+            while read -r service pid; do
+                local name="${service%.service}"
+                [[ "$pid" == "0" ]] && pid="-"
+                service_pids["$name"]="$pid"
+            done < <(systemctl show -p MainPID "${running_services[@]}" 2>/dev/null | \
+                    grep -E '^MainPID=' | \
+                    paste <(printf '%s\n' "${running_services[@]}") - | \
+                    sed 's/MainPID=//')
+            
+            # Batch uptime retrieval for running services
+            while read -r service timestamp; do
+                local name="${service%.service}"
+                service_uptimes["$name"]="$timestamp"
+            done < <(systemctl show -p ActiveEnterTimestamp "${running_services[@]}" 2>/dev/null | \
+                    grep -E '^ActiveEnterTimestamp=' | \
+                    paste <(printf '%s\n' "${running_services[@]}") - | \
+                    sed 's/ActiveEnterTimestamp=//')
+        fi
+    fi
+    
+    # Get memory info for all PIDs in one ps call
+    local -A pid_memory=()
+    local -a all_pids=()
+    for name in "${project_names[@]}"; do
+        local pid="${service_pids[$name]}"
+        if [[ -n "$pid" && "$pid" != "-" ]]; then
+            all_pids+=("$pid")
+        fi
+    done
+    
+    if [[ ${#all_pids[@]} -gt 0 ]]; then
+        while read -r pid rss; do
+            pid_memory["$pid"]=$(awk "BEGIN {printf \"%.1fM\", $rss/1024}")
+        done < <(ps -o pid,rss --no-headers -p $(IFS=','; echo "${all_pids[*]}") 2>/dev/null)
+    fi
+    
+    # Now display all projects
+    for name in "${project_names[@]}"; do
+        IFS=':' read -r service_file working_dir <<< "${project_data[$name]}"
+        
+        local status="${service_status[$name]:-inactive}"
+        local pid="${service_pids[$name]:--}"
+        local memory="-"
+        local uptime="-"
+        
+        if [[ "$status" == "active" ]]; then
             status="running"
             
-            # Get PID
-            pid=$(systemctl show -p MainPID "$name.service" --value 2>/dev/null || echo "-")
-            [[ "$pid" == "0" ]] && pid="-"
-            
-            # Get memory usage (in MB)
+            # Get memory from our cached data
             if [[ "$pid" != "-" ]]; then
-                memory=$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.1fM", $1/1024}' || echo "-")
-            else
-                memory="-"
+                memory="${pid_memory[$pid]:--}"
             fi
             
-            # Get uptime
-            uptime=$(systemctl show -p ActiveEnterTimestamp "$name.service" --value 2>/dev/null)
-            if [[ -n "$uptime" && "$uptime" != "n/a" ]]; then
-                local start_epoch=$(date -d "$uptime" +%s 2>/dev/null)
-                local current_epoch=$(date +%s)
-                local diff=$((current_epoch - start_epoch))
-                
-                if [[ $diff -lt 60 ]]; then
-                    uptime="${diff}s"
-                elif [[ $diff -lt 3600 ]]; then
-                    uptime="$((diff/60))m"
-                elif [[ $diff -lt 86400 ]]; then
-                    uptime="$((diff/3600))h$((diff%3600/60))m"
-                else
-                    uptime="$((diff/86400))d$((diff%86400/3600))h"
-                fi
-            else
-                uptime="-"
-            fi
+            # Format uptime
+            uptime=$(format_uptime "${service_uptimes[$name]}")
         else
             status="stopped"
-            pid="-"
-            memory="-"
-            uptime="-"
         fi
         
-        # Use echo -e instead of printf for color support
+        # Display with colors
         if [[ "$status" == "running" ]]; then
             echo -e "$(printf "%-20s " "$name")${GREEN}$(printf "%-10s" "$status")${NC}$(printf " %-8s %-10s %-12s %-30s" "$pid" "$memory" "$uptime" "$working_dir")"
         else
             echo -e "$(printf "%-20s " "$name")${RED}$(printf "%-10s" "$status")${NC}$(printf " %-8s %-10s %-12s %-30s" "$pid" "$memory" "$uptime" "$working_dir")"
         fi
-        
-    done < "$SM_PROJECTS_FILE"
+    done
     echo
 }
 
