@@ -11,7 +11,7 @@ _sm_completion() {
     cword=$COMP_CWORD
 
     # Commands available in sm
-    local commands="add start stop logs ls list remove rm workdir dive update install-helpers help"
+    local commands="add start stop logs ls list remove rm workdir dive update install-helpers uninstall help"
     
     # Get project names from the registry file
     local sm_dir="$HOME/.sm"

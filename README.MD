@@ -69,6 +69,9 @@ sm help
 * `sm help`
   Show the help message.
 
+* `sm uninstall`
+  Unlink sm and clean up any changed or added files.
+
 ---
 
 ## ⚡ Quickstart Example

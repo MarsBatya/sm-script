@@ -678,6 +678,109 @@ cmd_install_helpers() {
     fi
 }
 
+cmd_uninstall() {
+    log_info "This will remove SM (Service Manager) from your system"
+    echo ""
+    echo "The following will be removed:"
+    echo "  - SM directory and all data: $SM_DIR"
+    echo "  - Symlink from /usr/local/bin/sm"
+    echo "  - Entries from ~/.bashrc (completion and diving features)"
+    echo ""
+    
+    read -p "Do you want to proceed with uninstallation? [y/N]: " -r confirm
+    echo ""
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "Uninstallation cancelled"
+        return 0
+    fi
+    
+    local errors=0
+    
+    # Remove bashrc entries
+    log_info "Removing entries from ~/.bashrc..."
+    local bashrc="$HOME/.bashrc"
+    local repo_dir
+    repo_dir=$(find_sm_repo 2>/dev/null || echo "")
+    
+    if [[ -f "$bashrc" ]]; then
+        # Create backup
+        local backup_file="$bashrc.sm-backup-$(date +%Y%m%d-%H%M%S)"
+        # create a backup file
+        cp "$bashrc" "$backup_file"
+        log_info "Created backup of ~/.bashrc: $backup_file"
+        
+        # Remove SM-related lines
+        if [[ -n "$repo_dir" ]]; then
+            # Remove specific source lines and the header comment
+            sed -i "/# SM (Service Manager) helpful features/d" "$bashrc"
+            sed -i "\|$repo_dir/sm-completion.sh|d" "$bashrc"
+            sed -i "\|$repo_dir/sm-wrapper-for-dive.sh|d" "$bashrc"
+            log_success "Removed SM entries from ~/.bashrc"
+        else
+            log_warning "Could not find repo directory, manual cleanup of ~/.bashrc may be needed"
+        fi
+    else
+        log_warning "~/.bashrc not found, skipping"
+    fi
+    
+    # Remove SM directory
+    if [[ -d "$SM_DIR" ]]; then
+        log_info "Removing SM directory: $SM_DIR"
+        if rm -rf "$SM_DIR"; then
+            log_success "Removed $SM_DIR"
+        else
+            log_error "Failed to remove $SM_DIR"
+            ((errors++))
+        fi
+    else
+        log_info "SM directory not found: $SM_DIR"
+    fi
+    
+    # Remove symlink from /usr/local/bin
+    if [[ -L "/usr/local/bin/sm" ]]; then
+        log_info "Removing symlink from /usr/local/bin/sm"
+        if sudo rm "/usr/local/bin/sm"; then
+            log_success "Removed /usr/local/bin/sm"
+        else
+            log_error "Failed to remove /usr/local/bin/sm"
+            ((errors++))
+        fi
+    else
+        log_info "Symlink not found: /usr/local/bin/sm"
+    fi
+    
+    # Offer to delete cloned repository
+    if [[ -n "$repo_dir" && -d "$repo_dir" ]]; then
+        echo ""
+        log_info "Found SM repository at: $repo_dir"
+        read -p "Do you want to delete the cloned repository as well? [y/N]: " -r delete_repo
+        echo ""
+        
+        if [[ "$delete_repo" =~ ^[Yy]$ ]]; then
+            log_info "Removing repository directory: $repo_dir"
+            if rm -rf "$repo_dir"; then
+                log_success "Removed repository: $repo_dir"
+            else
+                log_error "Failed to remove repository: $repo_dir"
+                ((errors++))
+            fi
+        else
+            log_info "Repository kept at: $repo_dir"
+        fi
+    fi
+    
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        log_success "SM has been successfully uninstalled"
+        log_info "You may want to run 'source ~/.bashrc' or restart your terminal"
+    else
+        log_warning "Uninstallation completed with $errors error(s)"
+        log_info "You may need to manually clean up some files"
+        return 1
+    fi
+}
+
 cmd_help() {
     echo "Service Manager (sm) - A lightweight wrapper around systemctl"
     echo
@@ -693,6 +796,7 @@ cmd_help() {
     echo "  sm update                     - Update sm from git repository"
     echo "  sm install-helpers            - Install tab completion and 'sm dive' working properly into your ~/.bashrc"
     echo "  sm help                       - Show this help message"
+    echo "  sm uninstall                  - Uninstall sm and clean up files"
     echo
     echo "Note: Commands that accept [project_name] will automatically infer the project name"
     echo "      from .service files in the current directory if no name is provided."
@@ -739,6 +843,9 @@ main() {
             ;;
         help|--help|-h)
             cmd_help
+            ;;
+        uninstall|--uninstall)
+            cmd_uninstall
             ;;
         "")
             log_error "No command specified. Use 'sm help' for usage information."
