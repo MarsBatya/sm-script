@@ -362,6 +362,146 @@ cmd_stop() {
     log_success "Service '$name' stopped"
 }
 
+cmd_info() {
+    local name="$1"
+    
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm info <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+    
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found. Use 'sm ls' to see available projects."
+        exit 1
+    fi
+    
+    # Get project data from registry
+    local service_file working_dir
+    while IFS=':' read -r proj_name svc_file work_dir; do
+        if [[ "$proj_name" == "$name" ]]; then
+            service_file="$svc_file"
+            working_dir="$work_dir"
+            break
+        fi
+    done < "$SM_PROJECTS_FILE"
+    
+    echo
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BLUE}  Project Information: ${GREEN}$name${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo
+    
+    # Service file location
+    echo -e "${YELLOW}Service File:${NC}"
+    echo "  Local:  $service_file"
+    echo "  System: /etc/systemd/system/$name.service"
+    echo
+    
+    # Working directory
+    echo -e "${YELLOW}Working Directory:${NC}"
+    echo "  $working_dir"
+    echo
+    
+    # Git status
+    echo -e "${YELLOW}Git Status:${NC}"
+    if [[ -d "$working_dir/.git" ]]; then
+        pushd "$working_dir" > /dev/null 2>&1
+        local branch=$(git branch --show-current 2>/dev/null)
+        local commit=$(git rev-parse --short HEAD 2>/dev/null)
+        local status=$(git status --porcelain 2>/dev/null)
+        popd > /dev/null 2>&1
+        
+        if [[ -n "$branch" ]]; then
+            echo "  Branch: $branch"
+        fi
+        if [[ -n "$commit" ]]; then
+            echo "  Commit: $commit"
+        fi
+        if [[ -z "$status" ]]; then
+            echo -e "  Status: ${GREEN}Clean${NC}"
+        else
+            echo -e "  Status: ${YELLOW}Modified${NC}"
+        fi
+    else
+        echo "  Not a git repository"
+    fi
+    echo
+    
+    # Active state and systemctl info
+    echo -e "${YELLOW}Service Status:${NC}"
+    local active_state=$(systemctl show -p ActiveState "$name.service" 2>/dev/null | cut -d= -f2)
+    local sub_state=$(systemctl show -p SubState "$name.service" 2>/dev/null | cut -d= -f2)
+    local load_state=$(systemctl show -p LoadState "$name.service" 2>/dev/null | cut -d= -f2)
+    
+    if [[ "$active_state" == "active" ]]; then
+        echo -e "  State: ${GREEN}$active_state ($sub_state)${NC}"
+    elif [[ "$active_state" == "inactive" ]]; then
+        echo -e "  State: ${RED}$active_state ($sub_state)${NC}"
+    elif [[ "$active_state" == "failed" ]]; then
+        echo -e "  State: ${RED}$active_state ($sub_state)${NC}"
+    else
+        echo "  State: $active_state ($sub_state)"
+    fi
+    echo "  Load: $load_state"
+    
+    # Auto-restart info
+    local restart=$(systemctl show -p Restart "$name.service" 2>/dev/null | cut -d= -f2)
+    echo "  Restart Policy: $restart"
+    echo
+    
+    # Memory/CPU and uptime (only if active)
+    if [[ "$active_state" == "active" ]]; then
+        echo -e "${YELLOW}Resource Usage:${NC}"
+        local main_pid=$(systemctl show -p MainPID "$name.service" 2>/dev/null | cut -d= -f2)
+        
+        if [[ -n "$main_pid" && "$main_pid" != "0" ]]; then
+            echo "  PID: $main_pid"
+            
+            # Get memory and CPU from ps
+            local mem_cpu=$(ps -p "$main_pid" -o rss,pcpu --no-headers 2>/dev/null)
+            if [[ -n "$mem_cpu" ]]; then
+                local rss=$(echo "$mem_cpu" | awk '{print $1}')
+                local cpu=$(echo "$mem_cpu" | awk '{print $2}')
+                local mem_mb=$(awk "BEGIN {printf \"%.1f\", $rss/1024}")
+                echo "  Memory: ${mem_mb}M"
+                echo "  CPU: ${cpu}%"
+            fi
+        else
+            echo "  No main process found"
+        fi
+        echo
+        
+        # Time since last start
+        echo -e "${YELLOW}Uptime:${NC}"
+        local active_enter=$(systemctl show -p ActiveEnterTimestamp "$name.service" 2>/dev/null | cut -d= -f2)
+        if [[ -n "$active_enter" && "$active_enter" != "n/a" ]]; then
+            local uptime=$(format_uptime "$active_enter")
+            echo "  Running for: $uptime"
+            echo "  Started at: $active_enter"
+        else
+            echo "  N/A"
+        fi
+    else
+        # Show when it was last stopped
+        local inactive_enter=$(systemctl show -p InactiveEnterTimestamp "$name.service" 2>/dev/null | cut -d= -f2)
+        if [[ -n "$inactive_enter" && "$inactive_enter" != "n/a" ]]; then
+            echo
+            echo -e "${YELLOW}Last Activity:${NC}"
+            echo "  Stopped at: $inactive_enter"
+        fi
+    fi
+    
+    echo
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo
+}
+
 cmd_logs() {
     local name="$1"
     
@@ -788,6 +928,7 @@ cmd_help() {
     echo "  sm add                        - Add project from current directory"
     echo "  sm start [project_name]       - Start a project (infers name from .service file if not provided)"
     echo "  sm stop [project_name]        - Stop a project (infers name from .service file if not provided)"
+    echo "  sm info [project_name]        - Show project info (infers name from .service file if not provided)"
     echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
     echo "  sm remove/rm [project_name]   - Remove a project (infers name from .service file if not provided)"
     echo "  sm workdir [project_name]     - Echo the project folder path"
@@ -819,6 +960,9 @@ main() {
             ;;
         stop)
             cmd_stop "$@"
+            ;;
+        info)
+            cmd_info "$@"
             ;;
         logs)
             cmd_logs "$@"

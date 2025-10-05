@@ -42,6 +42,9 @@ sm help
 * `sm remove [project_name]`
   Remove a project (infers name from `.service` file if not provided).
 
+* `sm info [project_name]`
+  Show important info about a project (infers name from `.service` file if not provided).
+
 * `sm ls`
   List all projects.
 
@@ -89,7 +92,10 @@ sm logs
 # 4. Dive into the project folder
 sm dive
 
-# 5. Stop and remove the service when done
+# 5. Show info
+sm info
+
+# 6. Stop and remove the service when done
 sm stop
 sm remove
 ```
