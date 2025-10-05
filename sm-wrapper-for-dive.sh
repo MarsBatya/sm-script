@@ -1,6 +1,6 @@
 # Wrapper function for sm command to handle dive specially
 _sm_wrapper() {
-    if [[ "$1" == "dive" ]]; then
+    if [[ "$1" == "dive" || "$1" == "cd" ]]; then
         if [[ $# -eq 1 ]]; then
             echo "Where are we diving? Provide a project name please"
             return 1

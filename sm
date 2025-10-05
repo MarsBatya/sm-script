@@ -789,10 +789,10 @@ cmd_help() {
     echo "  sm start [project_name]       - Start a project (infers name from .service file if not provided)"
     echo "  sm stop [project_name]        - Stop a project (infers name from .service file if not provided)"
     echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
-    echo "  sm remove [project_name]      - Remove a project (infers name from .service file if not provided)"
+    echo "  sm remove/rm [project_name]   - Remove a project (infers name from .service file if not provided)"
     echo "  sm workdir [project_name]     - Echo the project folder path"
-    echo "  sm dive [project_name]        - Dive into a project folder (make sure to run 'sm install-helpers' first once)"
-    echo "  sm ls                         - List all projects"
+    echo "  sm dive/cd [project_name]     - Dive into a project folder (make sure to run 'sm install-helpers' first once)"
+    echo "  sm ls/list                    - List all projects"
     echo "  sm update                     - Update sm from git repository"
     echo "  sm install-helpers            - Install tab completion and 'sm dive' working properly into your ~/.bashrc"
     echo "  sm help                       - Show this help message"
@@ -838,7 +838,7 @@ main() {
         install-helpers)
             cmd_install_helpers "$@"
             ;;
-        dive)
+        dive|cd)
             cmd_dive_dummy "$@"
             ;;
         help|--help|-h)
