@@ -502,15 +502,106 @@ cmd_info() {
     echo
 }
 
+# Normalize shorthand time/date formats into journalctl-compatible strings
+parse_since() {
+    local input="$1"
+
+    # Relative time: 1h, 2h, 30m, 30min, 2d, 1w
+    if [[ "$input" =~ ^([0-9]+)(w|d|h|m|min)$ ]]; then
+        local amount="${BASH_REMATCH[1]}"
+        local unit="${BASH_REMATCH[2]}"
+        case "$unit" in
+            w)   echo "${amount} weeks ago" ;;
+            d)   echo "${amount} days ago" ;;
+            h)   echo "${amount} hours ago" ;;
+            m|min) echo "${amount} minutes ago" ;;
+        esac
+        return 0
+    fi
+
+    # Date: DD.MM.YY or DD.MM.YYYY
+    if [[ "$input" =~ ^([0-9]{2})\.([0-9]{2})\.([0-9]{2,4})$ ]]; then
+        local day="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local year="${BASH_REMATCH[3]}"
+        # Expand 2-digit year to 4-digit
+        if [[ ${#year} -eq 2 ]]; then
+            year="20${year}"
+        fi
+        echo "${year}-${month}-${day}"
+        return 0
+    fi
+
+    # Date + time: DD.MM.YY HH:MM or DD.MM.YYYY HH:MM
+    if [[ "$input" =~ ^([0-9]{2})\.([0-9]{2})\.([0-9]{2,4})\ ([0-9]{2}:[0-9]{2})$ ]]; then
+        local day="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local year="${BASH_REMATCH[3]}"
+        local time="${BASH_REMATCH[4]}"
+        if [[ ${#year} -eq 2 ]]; then
+            year="20${year}"
+        fi
+        echo "${year}-${month}-${day} ${time}"
+        return 0
+    fi
+
+    # Pass through anything else (e.g. already-valid "2026-02-26" or "yesterday")
+    echo "$input"
+}
+
 cmd_logs() {
-    local name="$1"
-    
-    # If no name provided, try to infer from current directory
+    local name=""
+    local lines=100
+    local follow=true          # default ON now
+    local since=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -n|--lines)
+                if [[ -z "$2" || ! "$2" =~ ^[0-9]+$ ]]; then
+                    log_error "--lines requires a positive integer"
+                    exit 1
+                fi
+                lines="$2"
+                shift 2
+                ;;
+            -f|--follow)
+                follow=true
+                shift
+                ;;
+            --no-follow)
+                follow=false
+                shift
+                ;;
+            -s|--since)
+                if [[ -z "$2" ]]; then
+                    log_error "--since requires a value (e.g. '1h', '2d', '26.02.26')"
+                    exit 1
+                fi
+                since=$(parse_since "$2")
+                shift 2
+                ;;
+            -h|--help)
+                log_info "Usage: sm logs [project_name] [-n lines] [-f|--no-follow] [-s since (e.g. '1h', '2d', '26.02.26')]"
+                exit 1
+                ;;
+            -*)
+                log_error "Unknown flag: $1"
+                log_info "Usage: sm logs [project_name] [-n lines] [-f|--no-follow] [-s since]"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+
     if [[ -z "$name" ]]; then
         name=$(infer_project_name)
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
-            log_info "Usage: sm start <project_name> or run from directory containing .service file"
+            log_info "Usage: sm logs <project_name> [-n lines] [-f|--no-follow] [-s since]"
             exit 1
         fi
         log_info "Inferred project name: $name"
@@ -520,15 +611,26 @@ cmd_logs() {
         log_error "Project '$name' not found. Use 'sm ls' to see available projects."
         exit 1
     fi
-    
-    log_info "Showing logs for '$name' (press Ctrl+C to exit)..."
+
+    local jctl_args=(-u "$name.service" --no-pager)
+
+    if [[ -n "$since" ]]; then
+        jctl_args+=(--since "$since")
+    else
+        jctl_args+=(-n "$lines")
+    fi
+
+    if [[ "$follow" == true ]]; then
+        jctl_args+=(-f)
+        log_info "Following logs for '$name' (Ctrl+C to stop)..."
+    else
+        log_info "Showing last $lines lines for '$name'..."
+    fi
+    [[ -n "$since" ]] && log_info "  Since: $since"
     echo
-    
-    # Set up signal handling to exit cleanly
+
     trap 'echo; log_info "Stopped watching logs"; exit 0' INT TERM
-    
-    # Execute journalctl in a way that handles interruption better
-    exec journalctl -u "$name.service" -f --no-pager
+    exec journalctl "${jctl_args[@]}"
 }
 
 cmd_workdir() {
