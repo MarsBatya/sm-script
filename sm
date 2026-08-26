@@ -67,30 +67,48 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check if project exists in our registry
-project_exists() {
+# Registry lines are "name:service_file:working_dir:owned". "owned" is 1 if
+# sm installed the unit file into /etc/systemd/system (and so may remove it
+# later), 0 if it only registered a pre-existing unit it doesn't manage.
+# Legacy lines (created before "owned" existed) have no 4th field.
+
+# Validate a project/service name: must be safe as a systemd unit name, as
+# a registry key (no ':', our field separator), and as a path component.
+valid_project_name() {
     local name="$1"
-    grep -q "^$name:" "$SM_PROJECTS_FILE" 2>/dev/null
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]]
 }
 
-# Add project to registry
+# Check if project exists in our registry. Uses an exact field match
+# (not a regex prefix match) so names containing regex metacharacters
+# can't cause false matches against other entries.
+project_exists() {
+    local name="$1"
+    awk -F: -v n="$name" '$1 == n { found = 1 } END { exit !found }' "$SM_PROJECTS_FILE" 2>/dev/null
+}
+
+# Add project to registry. $4 (owned) defaults to 1 for callers that don't
+# pass it, since that's the common case (sm installed the unit file).
 add_to_registry() {
     local name="$1"
     local service_file="$2"
     local working_dir="$3"
-    echo "$name:$service_file:$working_dir" >> "$SM_PROJECTS_FILE"
+    local owned="${4:-1}"
+    echo "$name:$service_file:$working_dir:$owned" >> "$SM_PROJECTS_FILE"
 }
 
 # Get service file path for project
 get_service_file() {
     local name="$1"
-    grep "^$name:" "$SM_PROJECTS_FILE" 2>/dev/null | cut -d: -f2
+    awk -F: -v n="$name" '$1 == n { print $2; exit }' "$SM_PROJECTS_FILE" 2>/dev/null
 }
 
 # Remove project from registry
 remove_from_registry() {
     local name="$1"
     if [[ -f "$SM_PROJECTS_FILE" ]]; then
+        # Safe as a plain (non-regex-metacharacter) match: names are
+        # validated against valid_project_name before being registered.
         sed -i "/^$name:/d" "$SM_PROJECTS_FILE"
     fi
 }
@@ -109,6 +127,10 @@ infer_project_name() {
         # Single service file found
         local service_file="${service_files[0]}"
         local name=$(basename "$service_file" .service)
+        if ! valid_project_name "$name"; then
+            log_error "Service file name '$service_file' contains characters sm can't safely use as a project name (only letters, digits, '.', '_', '-' allowed)" >&2
+            return 1
+        fi
         echo "$name"
         return 0
     else
@@ -125,6 +147,10 @@ infer_project_name() {
         if [[ "$choice" -ge 1 && "$choice" -le ${#service_files[@]} ]]; then
             local service_file="${service_files[$((choice-1))]}"
             local name=$(basename "$service_file" .service)
+            if ! valid_project_name "$name"; then
+                log_error "Service file name '$service_file' contains characters sm can't safely use as a project name (only letters, digits, '.', '_', '-' allowed)" >&2
+                return 1
+            fi
             echo "$name"
             return 0
         else
@@ -132,6 +158,13 @@ infer_project_name() {
             return 1
         fi
     fi
+}
+
+# Escape a string for safe use as the replacement side of a sed "s|||"
+# expression: backslash-escape the delimiter (|) and the two characters
+# (& and \) sed treats specially in a replacement.
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\&|]/\\&/g'
 }
 
 # Generate service file from template
@@ -142,13 +175,19 @@ generate_service() {
     local working_dir="$4"
     local user="$5"
     local service_file="$working_dir/$name.service"
-    
-    sed -e "s|{{DESCRIPTION}}|$description|g" \
-        -e "s|{{USER}}|$user|g" \
-        -e "s|{{WORKING_DIR}}|$working_dir|g" \
-        -e "s|{{EXEC_START}}|$exec_start|g" \
+
+    local esc_description esc_user esc_working_dir esc_exec_start
+    esc_description=$(sed_escape_replacement "$description")
+    esc_user=$(sed_escape_replacement "$user")
+    esc_working_dir=$(sed_escape_replacement "$working_dir")
+    esc_exec_start=$(sed_escape_replacement "$exec_start")
+
+    sed -e "s|{{DESCRIPTION}}|$esc_description|g" \
+        -e "s|{{USER}}|$esc_user|g" \
+        -e "s|{{WORKING_DIR}}|$esc_working_dir|g" \
+        -e "s|{{EXEC_START}}|$esc_exec_start|g" \
         "$SERVICE_TEMPLATE" > "$service_file"
-    
+
     echo "$service_file"
 }
 
@@ -181,6 +220,11 @@ cmd_add() {
             echo
             read -p "Project name: " name
             [[ -z "$name" ]] && { log_error "Project name is required"; exit 1; }
+
+            if ! valid_project_name "$name"; then
+                log_error "Invalid project name '$name': only letters, digits, '.', '_', '-' are allowed"
+                exit 1
+            fi
 
             if project_exists "$name"; then
                 log_error "Project '$name' already exists. Use 'sm remove $name' first, or pick a different name."
@@ -255,7 +299,7 @@ cmd_add() {
             sudo cp "$service_file" "/etc/systemd/system/"
             sudo systemctl daemon-reload
 
-            add_to_registry "$name" "$service_file" "$current_dir"
+            add_to_registry "$name" "$service_file" "$current_dir" 1
             log_success "Project '$name' added successfully, to start it, use 'sm start $name'"
         fi
     else
@@ -270,9 +314,14 @@ cmd_add() {
             read -p "Select service file (1-${#service_files[@]}): " choice
             service_file="${service_files[$((choice-1))]}"
         fi
-        
+
         local name=$(basename "$service_file" .service)
-        
+
+        if ! valid_project_name "$name"; then
+            log_error "Invalid project name '$name' (from $service_file): only letters, digits, '.', '_', '-' are allowed"
+            exit 1
+        fi
+
         if project_exists "$name"; then
             log_error "Project '$name' already exists"
             exit 1
@@ -291,8 +340,10 @@ cmd_add() {
             
             case "$choice" in
                 1)
-                    # Just add to registry without touching systemd
-                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+                    # Just add to registry without touching systemd. sm
+                    # didn't install this unit file, so it doesn't own it:
+                    # 'sm remove' must not delete it later.
+                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir" 0
                     log_success "Project '$name' added to sm management"
                     ;;
                 2)
@@ -300,7 +351,7 @@ cmd_add() {
                     log_info "Overwriting existing service file..."
                     sudo cp "$service_file" "/etc/systemd/system/"
                     sudo systemctl daemon-reload
-                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+                    add_to_registry "$name" "$current_dir/$service_file" "$current_dir" 1
                     log_success "Project '$name' added and service file updated"
                     ;;
                 3)
@@ -316,15 +367,34 @@ cmd_add() {
             # Service doesn't exist, install normally
             sudo cp "$service_file" "/etc/systemd/system/"
             sudo systemctl daemon-reload
-            add_to_registry "$name" "$current_dir/$service_file" "$current_dir"
+            add_to_registry "$name" "$current_dir/$service_file" "$current_dir" 1
             log_success "Project '$name' added successfully, to start it, use 'sm start $name'"
         fi
     fi
 }
 
 cmd_start() {
-    local name="$1"
-    
+    local name=""
+    local do_enable=true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-enable)
+                do_enable=false
+                shift
+                ;;
+            -*)
+                log_error "Unknown flag: $1"
+                log_info "Usage: sm start [project_name] [--no-enable]"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
         name=$(infer_project_name)
@@ -335,16 +405,18 @@ cmd_start() {
         fi
         log_info "Inferred project name: $name"
     fi
-    
+
     if ! project_exists "$name"; then
         log_error "Project '$name' not found. Use 'sm ls' to see available projects or 'sm add' to add it."
         exit 1
     fi
-    
+
     log_info "Starting service '$name'..."
-    sudo systemctl enable "$name.service"
+    if [[ "$do_enable" == true ]]; then
+        sudo systemctl enable "$name.service"
+    fi
     sudo systemctl restart "$name.service"
-    
+
     # Check if service started successfully
     if systemctl is-active --quiet "$name.service"; then
         log_success "Service '$name' started successfully"
@@ -355,9 +427,61 @@ cmd_start() {
     fi
 }
 
-cmd_stop() {
+cmd_restart() {
     local name="$1"
-    
+
+    # If no name provided, try to infer from current directory
+    if [[ -z "$name" ]]; then
+        name=$(infer_project_name)
+        if [[ $? -ne 0 || -z "$name" ]]; then
+            log_error "No project name provided and no .service file found in current directory"
+            log_info "Usage: sm restart <project_name> or run from directory containing .service file"
+            exit 1
+        fi
+        log_info "Inferred project name: $name"
+    fi
+
+    if ! project_exists "$name"; then
+        log_error "Project '$name' not found. Use 'sm ls' to see available projects."
+        exit 1
+    fi
+
+    # Deliberately does not touch the enabled/disabled state, unlike
+    # 'sm start' -- this only restarts, it doesn't change boot behavior.
+    log_info "Restarting service '$name'..."
+    sudo systemctl restart "$name.service"
+
+    if systemctl is-active --quiet "$name.service"; then
+        log_success "Service '$name' restarted successfully"
+    else
+        log_error "Failed to restart service '$name'"
+        echo "Use 'sm logs $name' to see error details"
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    local name=""
+    local do_disable=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --disable)
+                do_disable=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown flag: $1"
+                log_info "Usage: sm stop [project_name] [--disable]"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
+
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
         name=$(infer_project_name)
@@ -368,15 +492,21 @@ cmd_stop() {
         fi
         log_info "Inferred project name: $name"
     fi
-    
+
     if ! project_exists "$name"; then
         log_error "Project '$name' not found. Use 'sm ls' to see available projects."
         exit 1
     fi
-    
+
     log_info "Stopping service '$name'..."
     sudo systemctl stop "$name.service"
-    log_success "Service '$name' stopped"
+    if [[ "$do_disable" == true ]]; then
+        sudo systemctl disable "$name.service"
+        log_success "Service '$name' stopped and disabled (won't start on boot)"
+    else
+        log_success "Service '$name' stopped"
+        log_info "Note: it is still enabled and will start again on boot. Use 'sm stop --disable' to prevent that."
+    fi
 }
 
 cmd_info() {
@@ -398,9 +528,11 @@ cmd_info() {
         exit 1
     fi
     
-    # Get project data from registry
+    # Get project data from registry (4th field is the "owned" flag; read
+    # into a var even though it's unused here so it doesn't get appended
+    # onto work_dir)
     local service_file working_dir
-    while IFS=':' read -r proj_name svc_file work_dir; do
+    while IFS=':' read -r proj_name svc_file work_dir _owned; do
         if [[ "$proj_name" == "$name" ]]; then
             service_file="$svc_file"
             working_dir="$work_dir"
@@ -569,6 +701,7 @@ parse_since() {
 cmd_logs() {
     local name=""
     local lines=100
+    local lines_explicit=false
     local follow=true          # default ON now
     local since=""
 
@@ -580,6 +713,7 @@ cmd_logs() {
                     exit 1
                 fi
                 lines="$2"
+                lines_explicit=true
                 shift 2
                 ;;
             -f|--follow)
@@ -633,6 +767,10 @@ cmd_logs() {
 
     if [[ -n "$since" ]]; then
         jctl_args+=(--since "$since")
+        # Only cap lines here if the user explicitly asked for it with -n;
+        # otherwise -s alone means "show everything since that time", as
+        # before. Without this, -s silently swallowed a co-supplied -n.
+        [[ "$lines_explicit" == true ]] && jctl_args+=(-n "$lines")
     else
         jctl_args+=(-n "$lines")
     fi
@@ -662,7 +800,7 @@ cmd_workdir() {
         exit 1
     fi
     
-    while IFS=':' read -r proj_name service_file working_dir; do
+    while IFS=':' read -r proj_name service_file working_dir _owned; do
         if [[ "$proj_name" == "$name" ]]; then
             echo "$working_dir"
             exit 0
@@ -718,7 +856,7 @@ cmd_ls() {
     local -a project_names=()
     local -A project_data=()
     
-    while IFS=':' read -r name service_file working_dir; do
+    while IFS=':' read -r name service_file working_dir _owned; do
         project_names+=("$name")
         project_data["$name"]="$service_file:$working_dir"
     done < "$SM_PROJECTS_FILE"
@@ -840,9 +978,22 @@ cmd_remove() {
         log_error "Project '$name' not found"
         exit 1
     fi
-    
+
+    # Look up whether sm actually installed this unit file (owned=1) or
+    # only registered a pre-existing one it doesn't manage (owned=0), so we
+    # know whether it's ours to delete. Legacy entries predate this field
+    # and default to owned=1, matching the old (always-delete) behavior.
+    local owned=""
+    while IFS=':' read -r proj_name _svc_file _work_dir own_flag; do
+        if [[ "$proj_name" == "$name" ]]; then
+            owned="$own_flag"
+            break
+        fi
+    done < "$SM_PROJECTS_FILE"
+    [[ -z "$owned" ]] && owned=1
+
     read -p "Confirm to remove the project? (y/N): " confirm
-    
+
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
 
         log_info "Removing project '$name'..."
@@ -851,9 +1002,13 @@ cmd_remove() {
         sudo systemctl stop "$name.service" 2>/dev/null || true
         sudo systemctl disable "$name.service" 2>/dev/null || true
 
-        # Remove service file
-        sudo rm -f "/etc/systemd/system/$name.service"
-        sudo systemctl daemon-reload
+        if [[ "$owned" == "1" ]]; then
+            # sm installed this unit file, so it's sm's to remove
+            sudo rm -f "/etc/systemd/system/$name.service"
+            sudo systemctl daemon-reload
+        else
+            log_info "Unit file was not installed by sm (added via 'management only'); leaving /etc/systemd/system/$name.service in place"
+        fi
 
         # Remove from registry
         remove_from_registry "$name"
@@ -1049,8 +1204,13 @@ cmd_help() {
     echo
     echo "Usage:"
     echo "  sm add                        - Add project from current directory"
-    echo "  sm start [project_name]       - Start a project (infers name from .service file if not provided)"
-    echo "  sm stop [project_name]        - Stop a project (infers name from .service file if not provided)"
+    echo "  sm start [project_name] [--no-enable]"
+    echo "                                 - Start a project and enable it at boot (infers name if not provided;"
+    echo "                                   --no-enable starts without changing the enabled state)"
+    echo "  sm restart [project_name]     - Restart a project without touching its enabled/disabled state"
+    echo "  sm stop [project_name] [--disable]"
+    echo "                                 - Stop a project (infers name if not provided); it stays enabled"
+    echo "                                   at boot unless --disable is given"
     echo "  sm info [project_name]        - Show project info (infers name from .service file if not provided)"
     echo "  sm logs [project_name]        - Show project logs (infers name from .service file if not provided)"
     echo "  sm remove/rm [project_name]   - Remove a project (infers name from .service file if not provided)"
@@ -1080,6 +1240,9 @@ main() {
             ;;
         start)
             cmd_start "$@"
+            ;;
+        restart)
+            cmd_restart "$@"
             ;;
         stop)
             cmd_stop "$@"
