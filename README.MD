@@ -12,9 +12,16 @@ A lightweight wrapper around **systemctl** and **journalctl** for easier project
 
 ## 🚀 Installation
 
+Requires Linux with `systemd`, `bash`, and `sudo` access.
+
 ```bash
-sudo ln -s $PWD/sm /usr/local/bin/sm && sudo chmod +x $PWD/sm
-````
+git clone https://github.com/MarsBatya/sm-script.git
+cd sm-script
+sudo ln -s "$PWD/sm" /usr/local/bin/sm && sudo chmod +x "$PWD/sm"
+```
+
+Keep the cloned directory around — `sm update` (see below) pulls updates into it, and
+`sm install-helpers` sources scripts from it.
 
 ---
 
@@ -44,28 +51,42 @@ sm help
   Stop a project (infers name from `.service` file if not provided). By default the service stays enabled
   and will start again on the next boot; pass `--disable` to also disable it.
 
-* `sm remove [project_name]`
+* `sm remove [project_name]` (alias: `sm rm`)
   Remove a project (infers name from `.service` file if not provided). If the project was added with
   "add to sm management only" (see `sm add` below), sm never installed its unit file and won't delete it.
 
 * `sm info [project_name]`
   Show important info about a project (infers name from `.service` file if not provided).
 
-* `sm ls`
+* `sm ls` (alias: `sm list`)
   List all projects.
+
+* `sm update`
+  Pull the latest changes into the cloned `sm` repository (`git pull origin master`).
+  Requires that `sm` was installed by symlinking from a git clone (see Installation).
 
 ---
 
 ### Logs & Directories
 
-* `sm logs [project_name]`
+* `sm logs [project_name] [-n|--lines N] [-f|--follow | --no-follow] [-s|--since WHEN]`
   Show project logs (infers name from `.service` file if not provided).
+  Follows the log by default (`-f`); pass `--no-follow` to just print and exit.
+  `-n`/`--lines` caps the number of lines shown (default 100).
+  `-s`/`--since` filters by start time and accepts shorthand alongside anything `journalctl --since` understands:
+  relative (`30m`, `1h`, `2d`, `1w`) or absolute (`26.02.26`, `26.02.2026`, `26.02.26 14:30`).
+
+  ```bash
+  sm logs myapp -s 1h              # everything from the last hour, following
+  sm logs myapp -s 2d -n 50        # last 50 lines since 2 days ago
+  sm logs myapp --no-follow -n 20  # last 20 lines, no follow
+  ```
 
 * `sm workdir <project_name>`
   Echo the project folder path. Unlike most other commands, this requires an explicit `project_name` —
   it does not infer it from a `.service` file in the current directory.
 
-* `sm dive <project_name>`
+* `sm dive <project_name>` (alias: `sm cd`)
   Dive into a project folder. Also requires an explicit `project_name`.
   *(make sure to run `sm install-helpers` once beforehand).*
 
@@ -75,6 +96,8 @@ sm help
 
 * `sm install-helpers`
   Install tab completion and enable `sm dive` in your `~/.bashrc`.
+  ⚠️ Bash only — it edits `~/.bashrc`. zsh/fish users won't get completion or `sm dive`
+  from this command and need to source `sm-completion.sh` / `sm-wrapper-for-dive.sh` manually.
 
 * `sm help`
   Show the help message.
