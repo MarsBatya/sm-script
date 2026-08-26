@@ -113,19 +113,22 @@ infer_project_name() {
         return 0
     else
         # Multiple service files found
-        log_warning "Multiple .service files found in current directory:"
+        # NOTE: this function's stdout is captured via $(...) by callers, so
+        # every bit of human-facing output here must go to stderr, leaving
+        # stdout for the final "$name" only.
+        log_warning "Multiple .service files found in current directory:" >&2
         for i in "${!service_files[@]}"; do
-            echo "  $((i+1))) ${service_files[$i]}"
+            echo "  $((i+1))) ${service_files[$i]}" >&2
         done
         read -p "Select service file (1-${#service_files[@]}): " choice
-        
+
         if [[ "$choice" -ge 1 && "$choice" -le ${#service_files[@]} ]]; then
             local service_file="${service_files[$((choice-1))]}"
             local name=$(basename "$service_file" .service)
             echo "$name"
             return 0
         else
-            log_error "Invalid selection"
+            log_error "Invalid selection" >&2
             return 1
         fi
     fi
@@ -178,7 +181,12 @@ cmd_add() {
             echo
             read -p "Project name: " name
             [[ -z "$name" ]] && { log_error "Project name is required"; exit 1; }
-            
+
+            if project_exists "$name"; then
+                log_error "Project '$name' already exists. Use 'sm remove $name' first, or pick a different name."
+                exit 1
+            fi
+
             read -p "Description: " description
             [[ -z "$description" ]] && description="$name service"
             
@@ -231,13 +239,22 @@ cmd_add() {
 
             local user=$(whoami)
             local service_file=$(generate_service "$name" "$description" "$final_exec_start" "$current_dir" "$user")
-            
+
             log_success "Generated service file: $service_file"
-            
+
+            if [[ -f "/etc/systemd/system/$name.service" ]]; then
+                log_warning "Service '$name.service' already exists in systemd"
+                read -p "Overwrite it with the newly generated file? (y/N): " overwrite
+                if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
+                    log_info "Operation cancelled"
+                    exit 0
+                fi
+            fi
+
             # Install the service
             sudo cp "$service_file" "/etc/systemd/system/"
             sudo systemctl daemon-reload
-            
+
             add_to_registry "$name" "$service_file" "$current_dir"
             log_success "Project '$name' added successfully, to start it, use 'sm start $name'"
         fi
@@ -629,7 +646,8 @@ cmd_logs() {
     [[ -n "$since" ]] && log_info "  Since: $since"
     echo
 
-    trap 'echo; log_info "Stopped watching logs"; exit 0' INT TERM
+    # No trap here: exec below replaces this process image, so any trap
+    # set on it would never fire. journalctl handles Ctrl+C on its own.
     exec journalctl "${jctl_args[@]}"
 }
 
@@ -663,8 +681,11 @@ format_uptime() {
         return
     fi
     
-    local start_epoch=$(date -d "$uptime_str" +%s 2>/dev/null)
-    if [[ $? -ne 0 ]]; then
+    # Split declaration from assignment: `local x=$(...)` always makes `$?`
+    # reflect `local`'s own exit status (0), never the substitution's.
+    local start_epoch
+    start_epoch=$(date -d "$uptime_str" +%s 2>/dev/null)
+    if [[ $? -ne 0 || -z "$start_epoch" ]]; then
         echo "-"
         return
     fi
