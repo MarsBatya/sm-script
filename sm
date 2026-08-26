@@ -76,7 +76,11 @@ log_error() {
 # a registry key (no ':', our field separator), and as a path component.
 valid_project_name() {
     local name="$1"
-    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]]
+    # Leading '-' is excluded even though it's otherwise a legal character:
+    # every command that takes a positional [project_name] parses a
+    # leading-'-' argument as an unknown flag first, so such a name could
+    # be registered but never referenced again.
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ && "$name" != -* ]]
 }
 
 # Check if project exists in our registry. Uses an exact field match
@@ -103,13 +107,17 @@ get_service_file() {
     awk -F: -v n="$name" '$1 == n { print $2; exit }' "$SM_PROJECTS_FILE" 2>/dev/null
 }
 
-# Remove project from registry
+# Remove project from registry. Uses the same exact field match as
+# project_exists/get_service_file (rather than a sed regex address) so a
+# '.' in the name -- a legal character per valid_project_name, but a
+# "match any character" wildcard in a regex -- can't cause this to delete
+# an unrelated entry too (e.g. removing "my.app" deleting "myXapp").
 remove_from_registry() {
     local name="$1"
     if [[ -f "$SM_PROJECTS_FILE" ]]; then
-        # Safe as a plain (non-regex-metacharacter) match: names are
-        # validated against valid_project_name before being registered.
-        sed -i "/^$name:/d" "$SM_PROJECTS_FILE"
+        local tmp
+        tmp=$(mktemp "${SM_PROJECTS_FILE}.XXXXXX")
+        awk -F: -v n="$name" '$1 != n' "$SM_PROJECTS_FILE" > "$tmp" && mv "$tmp" "$SM_PROJECTS_FILE"
     fi
 }
 
@@ -182,11 +190,29 @@ generate_service() {
     esc_working_dir=$(sed_escape_replacement "$working_dir")
     esc_exec_start=$(sed_escape_replacement "$exec_start")
 
-    sed -e "s|{{DESCRIPTION}}|$esc_description|g" \
-        -e "s|{{USER}}|$esc_user|g" \
-        -e "s|{{WORKING_DIR}}|$esc_working_dir|g" \
-        -e "s|{{EXEC_START}}|$esc_exec_start|g" \
-        "$SERVICE_TEMPLATE" > "$service_file"
+    # Two-phase substitution: first swap the template's {{PLACEHOLDER}}
+    # markers for unique internal sentinels (\x01 is not typeable via
+    # `read -p`, so it can't collide with user input), THEN swap the
+    # sentinels for the actual escaped values. Doing it in one pass would
+    # let a later -e see text just inserted by an earlier one -- e.g. a
+    # Description containing the literal string "{{EXEC_START}}" would
+    # get that text replaced by the real exec_start value, since sed has
+    # no notion of "already substituted" text within a line.
+    local m_desc=$'\x01SM_DESCRIPTION\x01'
+    local m_user=$'\x01SM_USER\x01'
+    local m_wd=$'\x01SM_WORKING_DIR\x01'
+    local m_exec=$'\x01SM_EXEC_START\x01'
+
+    sed -e "s|{{DESCRIPTION}}|$m_desc|g" \
+        -e "s|{{USER}}|$m_user|g" \
+        -e "s|{{WORKING_DIR}}|$m_wd|g" \
+        -e "s|{{EXEC_START}}|$m_exec|g" \
+        "$SERVICE_TEMPLATE" | \
+    sed -e "s|$m_desc|$esc_description|g" \
+        -e "s|$m_user|$esc_user|g" \
+        -e "s|$m_wd|$esc_working_dir|g" \
+        -e "s|$m_exec|$esc_exec_start|g" \
+        > "$service_file"
 
     echo "$service_file"
 }
@@ -312,7 +338,12 @@ cmd_add() {
                 echo "  $((i+1))) ${service_files[$i]}"
             done
             read -p "Select service file (1-${#service_files[@]}): " choice
-            service_file="${service_files[$((choice-1))]}"
+            if [[ "$choice" -ge 1 && "$choice" -le ${#service_files[@]} ]] 2>/dev/null; then
+                service_file="${service_files[$((choice-1))]}"
+            else
+                log_error "Invalid selection"
+                exit 1
+            fi
         fi
 
         local name=$(basename "$service_file" .service)

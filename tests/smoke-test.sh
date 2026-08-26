@@ -416,6 +416,20 @@ assert_eq "add with ':' in name: exits nonzero" "1" "$rc"
 assert_eq "add with ':' in name: registry has no entry for it" "" \
     "$(grep "^bad" "$HOME/.sm/projects.txt" 2>/dev/null)"
 
+# Regression check: valid_project_name's charset (letters, digits, '.',
+# '_', '-') would otherwise allow a name to *start* with '-', but every
+# command that takes a positional [project_name] (start/stop/restart/
+# logs/info/remove) parses leading-'-' args as flags first, so such a name
+# could be registered but never referenced positionally afterwards.
+reset_registry
+proj_dir="$WORKDIR/proj-dashname"
+mkdir -p "$proj_dir"
+_saved_workdir="$WORKDIR"
+WORKDIR="$proj_dir"
+run_sm_with_input $'y\n-dash\nsome desc\n/bin/true\n' add
+WORKDIR="$_saved_workdir"
+assert_eq "add with leading '-' in name: rejected (name would be unusable positionally otherwise)" "1" "$rc"
+
 section "info / ls: 4-field registry doesn't corrupt working_dir"
 reset_registry
 register_project "smtest-info" "$WORKDIR/info.service" "$WORKDIR/some/dir" 1
@@ -463,6 +477,63 @@ gen_result=$(cd "$REPO_ROOT" && HOME="$HOME" bash -c '
 ')
 assert_contains "generate_service: & survives literally in Description" "$gen_result" "Description=Runs A & B | C \\ things"
 assert_contains "generate_service: | inside ExecStart survives literally" "$gen_result" 'ExecStart=/usr/bin/python3 main.py --flag "a|b"'
+
+# Regression check: a user-supplied Description containing literal
+# "{{EXEC_START}}"/"{{WORKING_DIR}}" text must survive as plain text, not
+# get re-substituted with the real values just because it happens to
+# match a *different* field's template placeholder syntax.
+gen_dir2="$WORKDIR/gen2"
+mkdir -p "$gen_dir2"
+gen_result2=$(cd "$REPO_ROOT" && HOME="$HOME" bash -c '
+    source <(sed -n "1,/^main \"\$@\"\$/p" "'"$SM_SCRIPT"'" | sed "\$d")
+    init_sm
+    generate_service "smtest-gen2" "Deploys {{EXEC_START}} to {{WORKING_DIR}}" \
+        "/usr/bin/python3 main.py" "'"$gen_dir2"'" "testuser" >/dev/null
+    cat "'"$gen_dir2"'/smtest-gen2.service"
+')
+assert_contains "generate_service: literal {{EXEC_START}} in Description text is not re-substituted" \
+    "$gen_result2" "Description=Deploys {{EXEC_START}} to {{WORKING_DIR}}"
+
+section "remove: '.' in a project name must not act as a sed wildcard"
+# Regression check: '.' is a legal character in a project name per
+# valid_project_name, but it's "match any character" in a regex, so
+# removing "my.app" must not also delete an unrelated entry like "myXapp"
+# that merely has some other character in the same position.
+reset_registry
+register_project "my.app" "$WORKDIR/a.service" "$WORKDIR/a" 0
+register_project "myXapp" "$WORKDIR/b.service" "$WORKDIR/b" 0
+run_sm_with_input $'y\n' remove my.app
+assert_eq "remove 'my.app': exits 0" "0" "$rc"
+assert_eq "remove 'my.app': unrelated 'myXapp' entry survives (dot must not act as wildcard)" \
+    "1" "$([[ -n "$(grep '^myXapp:' "$HOME/.sm/projects.txt" 2>/dev/null)" ]] && echo 1 || echo 0)"
+
+section "add: multi-file picker rejects invalid selection"
+# Regression check: unlike infer_project_name's equivalent prompt (which
+# bounds-checks the choice), cmd_add's "multiple .service files" branch
+# used to index the array with no validation at all -- non-numeric input
+# like "abc" makes bash's arithmetic context treat it as an unset variable
+# (== 0), so choice-1 silently evaluated to -1, and negative array
+# indexing silently selected the LAST file. Now it must be rejected
+# up front instead, same as infer_project_name's prompt.
+reset_registry
+proj_dir="$WORKDIR/proj-multi"
+mkdir -p "$proj_dir"
+for svc in alpha beta gamma; do
+    cat > "$proj_dir/$svc.service" <<EOF
+[Unit]
+Description=$svc
+[Service]
+ExecStart=/bin/true
+EOF
+done
+_saved_workdir="$WORKDIR"
+WORKDIR="$proj_dir"
+run_sm_with_input $'abc\n' add
+WORKDIR="$_saved_workdir"
+assert_eq "add: garbage selection ('abc') exits nonzero instead of silently succeeding" "1" "$rc"
+assert_contains "add: garbage selection ('abc') reports invalid selection" "$out" "Invalid selection"
+assert_eq "add: garbage selection ('abc') is not silently mapped to the last (gamma) entry" \
+    "0" "$([[ -n "$(grep '^gamma:' "$HOME/.sm/projects.txt" 2>/dev/null)" ]] && echo 1 || echo 0)"
 
 # ---------------------------------------------------------------------------
 # Summary
