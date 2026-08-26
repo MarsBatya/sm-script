@@ -204,6 +204,38 @@ esac
 EOF
 chmod +x "$MOCKBIN/systemctl"
 
+# --- fake systemd-analyze --------------------------------------------------
+# Minimal fake of `systemd-analyze verify FILE`: extracts ExecStart's
+# executable and checks it resolves (absolute path exists, or bare command
+# is on PATH), mirroring the real tool's core check closely enough for
+# tests without depending on the real systemd-analyze being installed.
+cat > "$MOCKBIN/systemd-analyze" <<'EOF'
+#!/usr/bin/env bash
+cmd="${1:-}"
+shift || true
+if [[ "$cmd" != "verify" ]]; then
+    echo "fake systemd-analyze: unhandled command: $cmd $*" >&2
+    exit 1
+fi
+file="$1"
+if [[ ! -f "$file" ]]; then
+    echo "Unit $file not found." >&2
+    exit 1
+fi
+exec_line=$(grep -E '^ExecStart=' "$file" | head -1 | cut -d= -f2-)
+exec_bin=$(awk '{print $1}' <<< "$exec_line")
+if [[ -z "$exec_bin" ]]; then
+    exit 0
+fi
+if [[ "$exec_bin" == /* ]]; then
+    [[ -e "$exec_bin" ]] || { echo "$(basename "$file"): Command $exec_bin is not executable: No such file or directory" >&2; exit 1; }
+else
+    command -v "$exec_bin" >/dev/null 2>&1 || { echo "$(basename "$file"): Command $exec_bin is not executable: No such file or directory" >&2; exit 1; }
+fi
+exit 0
+EOF
+chmod +x "$MOCKBIN/systemd-analyze"
+
 # --- fake journalctl -------------------------------------------------------
 # Never actually follows/blocks -- just records its argv so tests can
 # assert on exactly what sm passed it, then exits immediately.
@@ -351,6 +383,56 @@ assert_not_contains "stop: does not disable by default" "$(cat "$SM_TEST_SUDO_LO
 : > "$SM_TEST_SUDO_LOG"
 run_sm stop smtest-svc --disable
 assert_contains "stop --disable: disables" "$(cat "$SM_TEST_SUDO_LOG")" "disable smtest-svc.service"
+
+section "start / restart: pre-flight validation via systemd-analyze verify"
+reset_registry
+proj_dir="$WORKDIR/proj-verify"
+mkdir -p "$proj_dir"
+
+cat > "$proj_dir/smtest-badexec.service" <<'EOF'
+[Unit]
+Description=bad exec
+[Service]
+ExecStart=/nonexistent/path/to/binary
+[Install]
+WantedBy=multi-user.target
+EOF
+register_project "smtest-badexec" "$proj_dir/smtest-badexec.service" "$proj_dir" 1
+
+: > "$SM_TEST_SUDO_LOG"
+run_sm start smtest-badexec
+assert_eq "start: bad ExecStart fails validation, exits nonzero" "1" "$rc"
+assert_contains "start: reports validation failure" "$out" "failed validation"
+assert_not_contains "start: does not proceed to systemctl restart after failed validation" \
+    "$(cat "$SM_TEST_SUDO_LOG")" "restart smtest-badexec.service"
+
+: > "$SM_TEST_SUDO_LOG"
+run_sm start smtest-badexec --skip-verify
+assert_eq "start --skip-verify: bypasses validation, exits 0" "0" "$rc"
+assert_contains "start --skip-verify: proceeds to systemctl restart" \
+    "$(cat "$SM_TEST_SUDO_LOG")" "restart smtest-badexec.service"
+
+: > "$SM_TEST_SUDO_LOG"
+run_sm restart smtest-badexec
+assert_eq "restart: bad ExecStart fails validation, exits nonzero" "1" "$rc"
+assert_contains "restart: reports validation failure" "$out" "failed validation"
+
+cat > "$proj_dir/smtest-goodexec.service" <<'EOF'
+[Unit]
+Description=good exec
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+register_project "smtest-goodexec" "$proj_dir/smtest-goodexec.service" "$proj_dir" 1
+
+run_sm start smtest-goodexec
+assert_eq "start: valid unit passes validation, exits 0" "0" "$rc"
+assert_not_contains "start: no validation failure reported for valid unit" "$out" "failed validation"
+
+run_sm restart smtest-goodexec
+assert_eq "restart: valid unit passes validation, exits 0" "0" "$rc"
 
 section "remove: respects ownership"
 reset_registry

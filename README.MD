@@ -40,12 +40,18 @@ sm help
 * `sm add`
   Add project from the current directory.
 
-* `sm start [project_name] [--no-enable]`
+* `sm start [project_name] [--no-enable] [--skip-verify]`
   Start a project and enable it at boot (infers name from `.service` file if not provided).
   Pass `--no-enable` to start it without changing its enabled/disabled state.
 
-* `sm restart [project_name]`
+* `sm restart [project_name] [--skip-verify]`
   Restart a project without touching its enabled/disabled state (infers name from `.service` file if not provided).
+
+  Both `start` and `restart` first run `systemd-analyze verify` against the unit file systemd would actually
+  load (the installed copy in `/etc/systemd/system`, falling back to sm's local copy if that isn't readable),
+  so a bad directive (e.g. an `ExecStart` binary that doesn't exist) is reported clearly up front instead of
+  only showing up afterwards as "Failed to start service, use `sm logs`". A hard validation error blocks the
+  start/restart; pass `--skip-verify` to bypass the check and proceed anyway.
 
 * `sm stop [project_name] [--disable]`
   Stop a project (infers name from `.service` file if not provided). By default the service stays enabled

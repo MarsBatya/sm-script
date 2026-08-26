@@ -107,6 +107,51 @@ get_service_file() {
     awk -F: -v n="$name" '$1 == n { print $2; exit }' "$SM_PROJECTS_FILE" 2>/dev/null
 }
 
+# Pre-flight validation before starting/restarting a service: runs
+# `systemd-analyze verify` against the unit file so a bad directive (e.g.
+# an ExecStart binary that doesn't exist, or a bad option) surfaces as a
+# clear message here, instead of only showing up afterwards as "Failed to
+# start service, use 'sm logs'".
+#
+# Prefers the installed /etc/systemd/system copy -- that's what systemd
+# actually loads, and it's world-readable so this needs no sudo -- and
+# falls back to the local copy sm has on record (registry field 2) only if
+# the installed one isn't there/readable. This matters for "management
+# only" (owned=0) projects in particular: their registry entry points at
+# the project directory's copy, which can freely diverge from the
+# pre-existing installed unit that's the one actually authoritative.
+#
+# Returns 1 only on a hard validation error (the unit would fail to load).
+# Warnings are printed but don't block. Missing systemd-analyze, or no
+# file to check, silently skips validation rather than blocking.
+verify_service_file() {
+    local name="$1"
+    local service_file="/etc/systemd/system/$name.service"
+    if [[ ! -r "$service_file" ]]; then
+        service_file=$(get_service_file "$name")
+    fi
+
+    [[ -z "$service_file" || ! -f "$service_file" ]] && return 0
+    command -v systemd-analyze >/dev/null 2>&1 || return 0
+
+    local verify_output verify_status
+    verify_output=$(systemd-analyze verify "$service_file" 2>&1)
+    verify_status=$?
+
+    if [[ $verify_status -ne 0 ]]; then
+        log_error "Unit file '$service_file' failed validation:"
+        echo "$verify_output" | sed 's/^/  /' >&2
+        return 1
+    fi
+
+    if [[ -n "$verify_output" ]]; then
+        log_warning "Unit file '$service_file' has warnings:"
+        echo "$verify_output" | sed 's/^/  /' >&2
+    fi
+
+    return 0
+}
+
 # Remove project from registry. Uses the same exact field match as
 # project_exists/get_service_file (rather than a sed regex address) so a
 # '.' in the name -- a legal character per valid_project_name, but a
@@ -407,6 +452,7 @@ cmd_add() {
 cmd_start() {
     local name=""
     local do_enable=true
+    local skip_verify=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -414,9 +460,13 @@ cmd_start() {
                 do_enable=false
                 shift
                 ;;
+            --skip-verify)
+                skip_verify=true
+                shift
+                ;;
             -*)
                 log_error "Unknown flag: $1"
-                log_info "Usage: sm start [project_name] [--no-enable]"
+                log_info "Usage: sm start [project_name] [--no-enable] [--skip-verify]"
                 exit 1
                 ;;
             *)
@@ -442,6 +492,13 @@ cmd_start() {
         exit 1
     fi
 
+    if [[ "$skip_verify" != true ]]; then
+        if ! verify_service_file "$name"; then
+            log_info "Fix the issue above, or re-run with --skip-verify to start anyway."
+            exit 1
+        fi
+    fi
+
     log_info "Starting service '$name'..."
     if [[ "$do_enable" == true ]]; then
         sudo systemctl enable "$name.service"
@@ -459,7 +516,26 @@ cmd_start() {
 }
 
 cmd_restart() {
-    local name="$1"
+    local name=""
+    local skip_verify=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --skip-verify)
+                skip_verify=true
+                shift
+                ;;
+            -*)
+                log_error "Unknown flag: $1"
+                log_info "Usage: sm restart [project_name] [--skip-verify]"
+                exit 1
+                ;;
+            *)
+                name="$1"
+                shift
+                ;;
+        esac
+    done
 
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
@@ -475,6 +551,13 @@ cmd_restart() {
     if ! project_exists "$name"; then
         log_error "Project '$name' not found. Use 'sm ls' to see available projects."
         exit 1
+    fi
+
+    if [[ "$skip_verify" != true ]]; then
+        if ! verify_service_file "$name"; then
+            log_info "Fix the issue above, or re-run with --skip-verify to restart anyway."
+            exit 1
+        fi
     fi
 
     # Deliberately does not touch the enabled/disabled state, unlike
@@ -1235,10 +1318,12 @@ cmd_help() {
     echo
     echo "Usage:"
     echo "  sm add                        - Add project from current directory"
-    echo "  sm start [project_name] [--no-enable]"
+    echo "  sm start [project_name] [--no-enable] [--skip-verify]"
     echo "                                 - Start a project and enable it at boot (infers name if not provided;"
     echo "                                   --no-enable starts without changing the enabled state)"
-    echo "  sm restart [project_name]     - Restart a project without touching its enabled/disabled state"
+    echo "  sm restart [project_name] [--skip-verify]"
+    echo "                                 - Restart a project without touching its enabled/disabled state"
+    echo "  (sm start/restart run 'systemd-analyze verify' on the unit file first; --skip-verify bypasses it)"
     echo "  sm stop [project_name] [--disable]"
     echo "                                 - Stop a project (infers name if not provided); it stays enabled"
     echo "                                   at boot unless --disable is given"
