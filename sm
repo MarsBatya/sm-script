@@ -478,7 +478,7 @@ cmd_start() {
 
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm start <project_name> or run from directory containing .service file"
@@ -539,7 +539,7 @@ cmd_restart() {
 
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm restart <project_name> or run from directory containing .service file"
@@ -598,7 +598,7 @@ cmd_stop() {
 
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm stop <project_name> or run from directory containing .service file"
@@ -628,7 +628,7 @@ cmd_info() {
     
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm info <project_name> or run from directory containing .service file"
@@ -863,7 +863,7 @@ cmd_logs() {
     done
 
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm logs <project_name> [-n lines] [-f|--no-follow] [-s since]"
@@ -1079,7 +1079,7 @@ cmd_remove() {
     
     # If no name provided, try to infer from current directory
     if [[ -z "$name" ]]; then
-        name=$(infer_project_name)
+        name=$(infer_project_name) || true
         if [[ $? -ne 0 || -z "$name" ]]; then
             log_error "No project name provided and no .service file found in current directory"
             log_info "Usage: sm remove <project_name> or run from directory containing .service file"
