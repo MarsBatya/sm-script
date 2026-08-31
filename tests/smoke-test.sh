@@ -222,6 +222,14 @@ if [[ ! -f "$file" ]]; then
     echo "Unit $file not found." >&2
     exit 1
 fi
+if grep -q '# TEST_CGROUP_PERMISSION_DENIED' "$file" 2>/dev/null; then
+    echo "Failed to create /user.slice/user-1000.slice/session-28209.scope/init.scope control group: Permission denied" >&2
+    echo "Failed to initialize manager: Permission denied" >&2
+    exit 1
+fi
+if grep -q '# TEST_EMIT_CLEANUP_WARNING' "$file" 2>/dev/null; then
+    echo "Attempted to remove disk file system, and we can't allow that"
+fi
 exec_line=$(grep -E '^ExecStart=' "$file" | head -1 | cut -d= -f2-)
 exec_bin=$(awk '{print $1}' <<< "$exec_line")
 if [[ -z "$exec_bin" ]]; then
@@ -433,6 +441,36 @@ assert_not_contains "start: no validation failure reported for valid unit" "$out
 
 run_sm restart smtest-goodexec
 assert_eq "restart: valid unit passes validation, exits 0" "0" "$rc"
+
+cat > "$proj_dir/smtest-cleanupwarn.service" <<'EOF'
+# TEST_EMIT_CLEANUP_WARNING
+[Unit]
+Description=cleanup warning
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+register_project "smtest-cleanupwarn" "$proj_dir/smtest-cleanupwarn.service" "$proj_dir" 1
+
+run_sm start smtest-cleanupwarn
+assert_eq "start: unit with cleanup warning exits 0" "0" "$rc"
+assert_not_contains "start: cleanup warning is filtered out and not shown as warning" "$out" "has warnings"
+
+cat > "$proj_dir/smtest-cgrouperr.service" <<'EOF'
+# TEST_CGROUP_PERMISSION_DENIED
+[Unit]
+Description=cgroup error
+[Service]
+ExecStart=/bin/true
+[Install]
+WantedBy=multi-user.target
+EOF
+register_project "smtest-cgrouperr" "$proj_dir/smtest-cgrouperr.service" "$proj_dir" 1
+
+run_sm start smtest-cgrouperr
+assert_eq "start: unit with cgroup permission error does not fail, exits 0" "0" "$rc"
+assert_contains "start: reports cgroup environment warning instead of failing" "$out" "could not initialize manager in this environment"
 
 section "remove: respects ownership"
 reset_registry

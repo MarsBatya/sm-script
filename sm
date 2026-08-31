@@ -135,10 +135,29 @@ verify_service_file() {
     command -v systemd-analyze >/dev/null 2>&1 || return 0
 
     local verify_output verify_status
-    verify_output=$(systemd-analyze verify "$service_file" 2>&1)
-    verify_status=$?
+    # Run with sudo if available so systemd-analyze has permission to initialize its
+    # internal manager and transient cgroups when verifying system unit files.
+    if command -v sudo >/dev/null 2>&1; then
+        verify_output=$(sudo systemd-analyze verify "$service_file" 2>&1)
+        verify_status=$?
+    else
+        verify_output=$(systemd-analyze verify "$service_file" 2>&1)
+        verify_status=$?
+    fi
+
+    # Filter out harmless systemd internal cleanup noise (emitted when /tmp is not on tmpfs)
+    verify_output=$(echo "$verify_output" | grep -v "Attempted to remove disk file system" || true)
 
     if [[ $verify_status -ne 0 ]]; then
+        # If the failure is purely an environment/cgroup permission restriction preventing
+        # systemd-analyze from initializing its test manager, skip rather than hard-blocking.
+        local non_env_errors
+        non_env_errors=$(echo "$verify_output" | grep -v -E "Failed to initialize manager|control group: Permission denied" || true)
+        if [[ -z "$non_env_errors" ]]; then
+            log_warning "systemd-analyze could not initialize manager in this environment; skipping validation."
+            return 0
+        fi
+
         log_error "Unit file '$service_file' failed validation:"
         echo "$verify_output" | sed 's/^/  /' >&2
         return 1
